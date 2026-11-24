@@ -1,5 +1,4 @@
-
-      <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
@@ -384,7 +383,7 @@
       <h2>
         <span>🏆 명예의 전당</span>
       </h2>
-      <div class="rank-sub">플레이한 기록이 여기에 쌓입니다</div>
+      <div class="rank-sub" id="rankSubText">로컬 저장 모드 (DB 연결 시 전체 공유)</div>
       <ul class="rank-list" id="rankList"></ul>
       <div class="legend">
         📄 <strong>모의고사 시험지</strong>: 충돌 시 즉사<br />
@@ -397,7 +396,16 @@
   </div>
 
   <script>
-    const STORAGE_KEY = "suneung_escape_arcade_v3_fixed";
+    // =========================================================
+    // [중요] 친구들과 랭킹을 함께 쌓으려면 아래 따옴표 안에
+    // Firebase Realtime Database URL을 넣으세요!
+    // 예: "https://gosam-game-default-rtdb.firebaseio.com"
+    // 비워두면 내 브라우저(localStorage)에만 저장됩니다.
+    // =========================================================
+    const FIREBASE_DB_URL = "https://gosam-game-44142-default-rtdb.firebaseio.com";
+    const RANK_PATH = "suneung_escape_rankings.json";
+
+    const STORAGE_KEY = "suneung_escape_arcade_v4_shared";
 
     const DEFAULT_STATE = {
       schoolName: "",
@@ -415,7 +423,7 @@
       };
     }
 
-    function loadState() {
+    function loadLocalState() {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return cloneDefaultState();
@@ -431,7 +439,7 @@
       }
     }
 
-    function saveState() {
+    function saveLocalState() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
       } catch (e) {
@@ -439,8 +447,60 @@
       }
     }
 
-    let appState = loadState();
+    function hasCloudDb() {
+      return typeof FIREBASE_DB_URL === "string" && FIREBASE_DB_URL.trim().startsWith("https://");
+    }
+
+    function getDbEndpoint() {
+      const base = FIREBASE_DB_URL.trim().replace(/\/+$/, "");
+      return base + "/" + RANK_PATH;
+    }
+
+    async function fetchCloudRankings() {
+      if (!hasCloudDb()) return null;
+      try {
+        const res = await fetch(getDbEndpoint(), { cache: "no-store" });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (!data || typeof data !== "object") return [];
+        return Object.values(data)
+          .filter(function (item) {
+            return item && typeof item.score === "number";
+          })
+          .map(function (item) {
+            return {
+              school: String(item.school || "미입력 고등학교"),
+              nick: String(item.nick || "수능해방러"),
+              score: Number(item.score) || 0
+            };
+          });
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function pushCloudScore(entry) {
+      if (!hasCloudDb()) return false;
+      try {
+        const res = await fetch(getDbEndpoint(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            school: entry.school,
+            nick: entry.nick,
+            score: entry.score,
+            createdAt: Date.now()
+          })
+        });
+        return res.ok;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    let appState = loadLocalState();
     let gameRunning = false;
+    let lastHighlightKey = "";
 
     // =========================================================
     // Web Audio API 8비트 사운드 & 루프 배경음악 엔진
@@ -598,6 +658,7 @@
     const playerBadge = document.getElementById("playerBadge");
     const soundToggleBtn = document.getElementById("soundToggleBtn");
     const rankList = document.getElementById("rankList");
+    const rankSubText = document.getElementById("rankSubText");
 
     const startOverlay = document.getElementById("startOverlay");
     const overOverlay = document.getElementById("overOverlay");
@@ -636,6 +697,14 @@
     const keys = { left: false, right: false };
     let pointerActive = false;
 
+    function updateRankSubText() {
+      if (hasCloudDb()) {
+        rankSubText.textContent = "실시간 공유 랭킹 (누구나 접속해도 함께 쌓임)";
+      } else {
+        rankSubText.textContent = "내 브라우저 저장 모드 (FIREBASE_DB_URL 설정 시 공유)";
+      }
+    }
+
     function updateSoundButton() {
       if (soundEngine.isEnabled()) {
         soundToggleBtn.textContent = "🔊 사운드 ON";
@@ -666,10 +735,11 @@
     }
 
     function renderRankings(highlightKey) {
+      const targetKey = typeof highlightKey === "string" ? highlightKey : lastHighlightKey;
       const sorted = appState.rankings
         .slice()
         .sort(function (a, b) { return b.score - a.score; })
-        .slice(0, 6);
+        .slice(0, 8);
 
       rankList.innerHTML = "";
 
@@ -684,7 +754,7 @@
       sorted.forEach(function (entry, idx) {
         const li = document.createElement("li");
         const key = entry.school + "__" + entry.nick + "__" + entry.score;
-        li.className = "rank-item" + (key === highlightKey ? " highlight" : "");
+        li.className = "rank-item" + (key === targetKey ? " highlight" : "");
         li.innerHTML =
           '<div class="rank-left">' +
             '<span class="rank-num">' + (idx + 1) + "</span>" +
@@ -704,6 +774,16 @@
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+    }
+
+    async function syncRankingsFromCloud() {
+      if (!hasCloudDb()) return;
+      const cloudList = await fetchCloudRankings();
+      if (Array.isArray(cloudList)) {
+        appState.rankings = cloudList;
+        saveLocalState();
+        renderRankings();
+      }
     }
 
     function addFloatText(x, y, text, color) {
@@ -772,7 +852,7 @@
       const nickVal = nickInput.value.trim();
       appState.schoolName = schoolVal;
       appState.nickname = nickVal || "수능해방러";
-      saveState();
+      saveLocalState();
 
       player.x = canvas.width / 2;
       player.invincibleTimer = 0;
@@ -798,7 +878,7 @@
       rafId = requestAnimationFrame(loop);
     }
 
-    function endGame(reasonText) {
+    async function endGame(reasonText) {
       gameRunning = false;
       shakeTimer = 0.25;
       soundEngine.sfxGameOver();
@@ -815,10 +895,12 @@
         nick: appState.nickname,
         score: finalScore
       };
+      lastHighlightKey = newEntry.school + "__" + newEntry.nick + "__" + newEntry.score;
+
       appState.rankings.push(newEntry);
       appState.rankings.sort(function (a, b) { return b.score - a.score; });
-      appState.rankings = appState.rankings.slice(0, 20);
-      saveState();
+      appState.rankings = appState.rankings.slice(0, 50);
+      saveLocalState();
 
       const rankIndex = appState.rankings.findIndex(function (r) {
         return r.school === newEntry.school && r.nick === newEntry.nick && r.score === newEntry.score;
@@ -827,11 +909,16 @@
       overReason.textContent = reasonText;
       finalScoreText.textContent = finalScore.toLocaleString() + "점";
       rankStatusText.textContent =
-        rankIndex >= 0 ? "현재 전체 " + (rankIndex + 1) + "위 기록이 저장되었습니다!" : "기록이 저장되었습니다.";
+        rankIndex >= 0 ? "현재 " + (rankIndex + 1) + "위 기록이 반영되었습니다!" : "기록이 반영되었습니다.";
 
       updateHud();
-      renderRankings(newEntry.school + "__" + newEntry.nick + "__" + newEntry.score);
+      renderRankings(lastHighlightKey);
       overOverlay.classList.remove("hidden");
+
+      if (hasCloudDb()) {
+        await pushCloudScore(newEntry);
+        await syncRankingsFromCloud();
+      }
     }
 
     function update(dt) {
@@ -1089,10 +1176,12 @@
     startBtn.addEventListener("click", startGame);
     restartBtn.addEventListener("click", startGame);
 
+    updateRankSubText();
     updateSoundButton();
     updateHud();
     renderRankings();
     draw();
+    syncRankingsFromCloud();
   </script>
 </body>
 </html>
